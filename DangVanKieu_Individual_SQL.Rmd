@@ -1,0 +1,343 @@
+---
+title: "Inventory Control System"
+author: "Dang Van Kieu"
+date: "12/19/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+# install.packages(c("knitr", "DBI", "RSQLite")) # R package installation
+library(knitr)
+library(DBI)  # R interface tot database systems
+library(RSQLite) # R interface to SQLite database and systems
+
+
+knitr::opts_chunk$set(echo = TRUE)
+# databse connection
+DVK = dbConnect(RSQLite::SQLite(), dbname ="DangVanKieu_Individual_Database.db")  
+knitr::opts_chunk$set(connection = DVK)
+```
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r}
+dbListTables(DVK)
+```
+
+# 1.	Movements of products with their general information by quantity. The output should be sorted in descending order and only display first and last 5 results with ranking by order quantity to see which one is the best-selling and which one has bad performance among the assortments.
+```{sql connection=DVK, max.print=-1}
+WITH Sales_Table AS 
+  (SELECT *, RANK () OVER (ORDER BY Total_Quantity DESC) Sales_Rank 
+  FROM 
+    (SELECT p.Product_Name, SUM (Order_Quantity) AS Total_Quantity 
+    FROM ITEM_ORDERS i 
+    NATURAL JOIN PRODUCTS p 
+    GROUP BY i.Product_ID 
+    ORDER BY Total_Quantity)
+  )
+
+SELECT * 
+FROM Sales_Table 
+WHERE Sales_Rank <= 5 
+UNION
+SELECT * 
+FROM Sales_Table 
+WHERE Sales_Rank >= ((SELECT MAX(Sales_Rank) FROM Sales_Table)-5)
+ORDER BY Total_Quantity DESC;
+```
+
+
+# 2.a.	Movements of products by category by total amount with their general information. The output should be sorted in descending order to see which one is top 3 best-selling items in each category in terms of revenue. Revenue should be counted only status is delivered.
+```{sql connection=DVK, max.print=-1}
+WITH TrackSales AS (
+  SELECT p.Product_Name, pc.Category_ID, pc.Category_Name, SUM(i.Order_Quantity*p.Price) AS Revenue 
+  FROM ITEM_ORDERS i 
+  NATURAL JOIN PRODUCTS p 
+  NATURAL JOIN ORDERS o 
+  NATURAL JOIN PRODUCT_CATEGORIES pc 
+  WHERE o.Order_Status == "Delivered" 
+  GROUP BY i.Product_ID)
+
+SELECT * 
+FROM 
+  (SELECT *, RANK() OVER ( PARTITION BY Category_ID ORDER BY Revenue DESC) Sales_Rank 
+  FROM TrackSales) 
+WHERE Sales_Rank <= 3 
+ORDER BY Category_ID, Sales_Rank 
+ASC LIMIT 20;
+```
+
+
+# 2.b.	For the top 3 products by revenue above, the company wants to discount selling prices for them by 10% for those ranking 1, 5% for those ranking 2 and 3% for those ranking 3 by each category, the rest products will keep the same price for next year. Price will be rounded up to 2 decimal numbers.Display only products with price change.Revenue should be counted only status is delivered.
+```{sql connection=DVK, max.print=-1}
+WITH TrackSales AS (
+  SELECT p.Product_Name, p.Price, pc.Category_ID, pc.Category_Name,SUM(i.Order_Quantity*p.Price) AS Revenue 
+  FROM ITEM_ORDERS i
+  NATURAL JOIN PRODUCTS p 
+  NATURAL JOIN ORDERS o 
+  NATURAL JOIN PRODUCT_CATEGORIES pc
+  WHERE o.Order_Status == "Delivered"
+  GROUP BY i.Product_ID),
+
+Top3 AS 
+  (SELECT * FROM (SELECT *, RANK() OVER ( PARTITION BY Category_ID ORDER BY Revenue DESC) Sales_Rank 
+  FROM TrackSales) 
+  WHERE Sales_Rank <= 3 
+  ORDER BY Category_ID, Sales_Rank ASC)
+
+SELECT *, CASE 
+  WHEN Sales_Rank =1 THEN ROUND(Price*0.9,2)
+  WHEN Sales_Rank =2 THEN ROUND(Price*0.95,2) 
+  ELSE ROUND(Price*0.97,2)
+  END AS New_Price 
+FROM Top3 
+LIMIT 20;
+```
+
+
+# 3.	Customer demographic: Which countries have the most orders from the site?
+```{sql connection=DVK, max.print=-1}
+SELECT od.Country, COUNT(o.Order_ID) AS OrderCount, ROUND(COUNT(od.Country)*100/(SELECT COUNT(*) FROM ORDERS),2) AS Percentage 
+FROM ORDERS o 
+INNER JOIN ORDER_ADDRESSES od On o.Shipping_Address_ID = od.Order_Address_ID
+GROUP BY od.Country 
+ORDER BY OrderCount DESC 
+LIMIT 20;
+```
+
+# 4.	Customer demographic: Detail to the location of provinces of for top 1 country having the most order.
+```{sql connection=DVK, max.print=-1}
+SELECT od.Country, od.Province, COUNT(o.Order_ID) AS OrderCount, ROUND(COUNT(od.Province)*100/t.OrderCount,2) AS Percentage FROM ORDERS o
+INNER JOIN ORDER_ADDRESSES od On o.Shipping_Address_ID = od.Order_Address_ID
+INNER JOIN (
+              SELECT od.Country, COUNT(o.Order_ID) AS OrderCount FROM ORDERS o
+              INNER JOIN ORDER_ADDRESSES od On o.Shipping_Address_ID = od.Order_Address_ID
+              GROUP BY od.Country ORDER BY OrderCount DESC LIMIT 1 ) t
+ON od.Country = t.Country
+GROUP BY od.Country, od.Province ORDER BY OrderCount DESC;
+```
+# 5. Operational analysis: The proportion of Order status? This is to know if the cancellation rate is less than 0.5% as average of industry.
+```{sql connection=DVK, max.print=-1}
+SELECT Order_Status, COUNT(Order_Status) AS StatusCount, 
+ROUND(COUNT(Order_Status)*100/(SELECT COUNT(*) FROM ORDERS),2) AS Proportion 
+FROM ORDERS
+GROUP BY Order_Status 
+ORDER BY StatusCount DESC;
+```
+
+# 6.a	Time series analysis: Which month of the year and which date of that month the selling peaks at?
+```{sql connection=DVK, max.print=-1}
+SELECT o.Order_Month, o.Order_Date, COUNT(o.Order_ID) AS "Date_Order", SUM(o.Order_Total) AS "Revenue_Per_Date" 
+FROM ORDERS o
+WHERE o.Order_Month == 
+  (SELECT temp.Order_Month 
+  FROM 
+    (SELECT o.Order_Month, SUM(o.Order_Total) AS "Monthly_Revenue" 
+    FROM ORDERS o 
+    GROUP BY o.Order_Month 
+    ORDER BY "Monthly_Revenue" DESC 
+    LIMIT 1) temp)
+GROUP BY o.Order_Date 
+ORDER BY "Revenue_Per_Date" DESC 
+LIMIT 1;
+```
+
+# 6.b	Time series analysis: Which quarter of the year the selling peaks at?
+```{sql connection=DVK, max.print=-1}
+SELECT CASE
+  WHEN Order_Month <4 THEN "Q1" 
+  WHEN Order_Month >=4 AND Order_Month <7 THEN "Q2"
+  WHEN Order_Month >=7 AND Order_Month <10 THEN "Q3" 
+  ELSE "Q4" 
+  END AS "Quarter", 
+  COUNT(Order_ID) AS "Count", 
+  SUM(Order_Total) AS "Revenue_Per_Quarter"
+FROM ORDERS 
+GROUP BY "Quarter" 
+ORDER BY "Revenue_Per_Quarter"  DESC;
+```
+
+# 7. Total product availabilities per item and its information: name and category, sorted by descending order. Also display stock ranking within category and within total available products.
+```{sql connection=DVK, max.print=-1}
+WITH Stock AS 
+  (SELECT p.Product_Name, pc.Category_ID, pc.Category_Name, SUM(iv.Total_Product_Availability) AS InStock 
+  FROM PRODUCTS p 
+  NATURAL JOIN ITEM_AVAILABILITIES iv NATURAL JOIN PRODUCT_CATEGORIES pc 
+  GROUP BY p.Category_ID, iv.Product_ID)
+
+SELECT * , 
+  RANK() OVER (ORDER BY InStock DESC) Stock_Rank,
+  RANK() OVER (PARTITION BY Category_ID ORDER BY InStock DESC) Category_Rank 
+FROM Stock 
+ORDER BY Category_ID 
+LIMIT 20;
+```
+
+# 8.a	For top 5 best-selling product by quantity above, category manager sets minimum 40 units per product per warehouse, is there any warehouses violate this rule?
+```{sql connection=DVK, max.print=-1}
+SELECT w.Warehouse_ID, w.Warehouse_Name, p.Product_Name, SUM(iv.Total_Product_Availability) AS InStock 
+FROM WAREHOUSES w NATURAL JOIN ITEM_AVAILABILITIES iv NATURAL JOIN PRODUCTS p
+WHERE p.Product_ID IN 
+  (SELECT k1.Product_ID 
+  FROM
+    (SELECT p.Product_ID, p.Product_Name, SUM(i.Order_Quantity) AS Total_Quantity
+    FROM ITEM_ORDERS i 
+    NATURAL JOIN PRODUCTS p 
+    GROUP BY p.Product_ID
+    ORDER BY Total_Quantity DESC
+    LIMIT 5) k1) 
+GROUP BY w.Warehouse_ID, p.Product_ID 
+HAVING InStock < 40 
+ORDER BY InStock DESC;
+```
+
+
+# 8.b	For top 5 best-selling product by quantity above, category manager sets minimum 40 units per product per warehouse. If stock < 40 units, status: Order Immediately; if stock from 40 to 100, status: Order Soon; else, status: Safe Level. Display in urgent level. 
+```{sql connection=DVK, max.print=-1}
+WITH Status AS 
+  (SELECT w.Warehouse_ID, w.Warehouse_Name, p.Product_Name, SUM(iv.Total_Product_Availability) AS InStock 
+  FROM WAREHOUSES w 
+  NATURAL JOIN ITEM_AVAILABILITIES iv 
+  NATURAL JOIN PRODUCTS p
+  WHERE p.Product_ID IN 
+    (SELECT k1.Product_ID 
+    FROM
+      (SELECT p.Product_ID, p.Product_Name, SUM(i.Order_Quantity) AS Total_Quantity
+      FROM ITEM_ORDERS i 
+      NATURAL JOIN PRODUCTS p 
+      GROUP BY p.Product_ID
+      ORDER BY Total_Quantity DESC
+      LIMIT 5) k1) 
+  GROUP BY w.Warehouse_ID, p.Product_ID)
+
+SELECT * , CASE 
+WHEN InStock < 40 THEN "Order Immerdiately"
+WHEN InStock >= 40 AND InStock <=100 THEN "Order Soon" 
+ELSE "Safe Level"
+END AS Stock_Status 
+FROM Status 
+ORDER BY InStock ASC 
+LIMIT 20;
+```
+
+
+# 9.	Is there any warehouse, which has out-of-stock items?  Display warehouse necessary information and number of out-of-stock item it has.
+```{sql connection=DVK, max.print=-1}
+SELECT w.Warehouse_ID, w.Warehouse_Name, w.City, w.Country, COUNT (w.Warehouse_ID) AS "OOS_SKU" 
+FROM WAREHOUSES w 
+NATURAL JOIN ITEM_AVAILABILITIES iv 
+WHERE iv.Total_Product_Availability = 0 
+GROUP BY w.Warehouse_ID;
+```
+# 10.	Location of the warehouse with the most inventory, does that align with sales performance?
+```{sql connection=DVK, max.print=-1}
+SELECT DISTINCT w.Warehouse_ID, w.Warehouse_Name,w.Country, w.Province, SUM(iv.Total_Product_Availability) AS TotalInventory 
+FROM WAREHOUSES w
+NATURAL JOIN ITEM_AVAILABILITIES iv 
+GROUP BY w.Warehouse_ID 
+ORDER BY TotalInventory DESC 
+LIMIT 5;
+```
+# 11.	Top 5 suppliers with the most products contributed? Note: one company has many IDs as the system counts by different location that's why I group by Company Name but not Company ID. For example ID1: Walmart, LA, USA; ID2: Walmart, TX, USA.
+```{sql connection=DVK, max.print=-1}
+SELECT s.Company_Name, COUNT(p.Product_ID) AS "Total_Number"  
+FROM PRODUCTS p
+INNER JOIN SUPPLIERS s ON s.Supplier_ID = p.Supplier_ID
+GROUP BY s.Company_Name 
+ORDER BY "Total_Number" DESC 
+LIMIT 5;
+```
+
+# 12.	Top sold products belong to which suppliers?
+```{sql connection=DVK, max.print=-1}
+SELECT s.Supplier_ID, s.Company_Name, p.Product_Name, SUM(i.Order_Quantity) AS "Total_Order"  
+FROM ITEM_ORDERS i 
+NATURAL JOIN PRODUCTS p 
+NATURAL JOIN SUPPLIERS s
+GROUP BY s.Supplier_ID, p.Product_ID 
+ORDER BY "Total_Order" DESC 
+LIMIT 5;
+```
+
+# 13.	In each product category, show top 3 products that have most sales increase between the most recent year and the previous year. For each record, display category name, product name, supplier name, current year sales, last year sales, variance (%).
+```{sql connection=DVK, max.print=-1}
+WITH Sales AS 
+  (SELECT p.Product_Name, p.Category_ID, p.Supplier_ID, p.Brand, o.Order_Year, i.Order_Quantity, p.Price,   (i.Order_Quantity * p.Price) AS Sales
+	FROM ITEM_ORDERS i 
+	NATURAL JOIN ORDERS o 
+	NATURAL JOIN PRODUCTS p
+	WHERE o.Order_Year 
+	  IN (
+	  (SELECT MAX(Order_Year) AS Current_Year FROM ORDERS), 
+		(SELECT MAX(Order_Year)-1 AS Last_Year FROM ORDERS)
+		)
+	),
+		
+Sales_Sum AS 
+  (SELECT Product_Name, Category_ID, Supplier_ID, Brand, 
+    SUM(IIF(Order_Year = (SELECT MAX(Order_Year) AS Current_Year FROM Orders), Sales, 0)) AS Current_Year_Sales,
+		SUM(IIF(Order_Year = (SELECT MAX(Order_Year)-1 AS Last_Year FROM Orders), Sales, 0)) AS Last_Year_Sales 
+	FROM Sales 		
+	GROUP BY Product_Name, Category_ID, Supplier_ID, Brand
+	HAVING Last_Year_Sales <> 0
+	),
+		
+Variance AS 
+  (SELECT Product_Name, Category_ID, Supplier_ID, Brand, Current_Year_Sales, Last_Year_Sales, ROUND(((Current_Year_Sales - Last_Year_Sales)/Last_Year_Sales)*100,2) AS Sales_Variance, 
+  ROW_NUMBER() OVER (PARTITION BY Category_ID ORDER BY (Current_Year_Sales - Last_Year_Sales)/Last_Year_Sales DESC) AS Variance_Rank
+	FROM Sales_Sum)
+
+SELECT c.Category_Name, v.Product_Name, s.Company_Name AS Supplier_Name, v.Current_Year_Sales, v.Last_Year_Sales, v.Sales_Variance
+FROM Variance v 
+NATURAL JOIN SUPPLIERS s 
+NATURAL JOIN PRODUCT_CATEGORIES c
+WHERE Variance_Rank <= 3 AND v.Sales_Variance > 0
+ORDER BY c.Category_Name, v.Sales_Variance DESC;
+```
+
+
+# 14.	Logistic management: As the demand for pet care is increasing significantly, the company wants to check if every product with “Pet” in its name and within the Pet Supplies and Toys&Games category but not from other categories (using except for negative subquery or condition for the most convenience) has grown significantly and is offered shipping express or not. Display sales increase growth rate from 2016 to 2019 and its shipping method.
+```{sql connection=DVK, max.print=-1}
+SELECT Product_Name, Category_Name, Is_Express_Shipping, 
+ROUND(((FY17-FY16)/FY16)*100,2) AS "YoY1617",ROUND(((FY18-FY17)/FY17)*100,2) AS "YoY1718",
+ROUND(((FY19-FY18)/FY18)*100,2) AS "YoY1819" 
+FROM (SELECT p.Product_Name, pc.Category_Name, p.Is_Express_Shipping,
+SUM(CASE WHEN o.Order_Year =2016 THEN p.Price*i.Order_Quantity ELSE 0 END) AS FY16, 
+SUM(CASE WHEN o.Order_Year =2017 THEN p.Price*i.Order_Quantity ELSE 0 END) AS FY17,  
+SUM(CASE WHEN o.Order_Year =2018 THEN p.Price*i.Order_Quantity ELSE 0 END) AS FY18, 
+SUM(CASE WHEN o.Order_Year =2019 THEN p.Price*i.Order_Quantity ELSE 0 END) AS FY19 
+FROM ORDERS o 
+NATURAL JOIN ITEM_ORDERS i 
+NATURAL JOIN PRODUCTS p 
+NATURAL JOIN PRODUCT_CATEGORIES pc 
+WHERE o.Order_Status == "Delivered" AND p.Product_Name LIKE "%pet%" AND pc.Category_Name IN ('Toys & Games','Pet Supplies') 
+GROUP BY i.Product_ID)
+```
+
+
+# 15.	The marketing department wants to investigate about bad performance of some products that had sales in 2020 but not in 2021. Create a new table displaying all related information: price, sales in 2020 for those by category for later use. (Deploy Left Join, View and If Null function to replace Null/ NA value to 0 for Sales in 2021 for this query) 
+
+```{sql connection=DVK, max.print=-1}
+DROP VIEW IF EXISTS Bad_Performance_Product;
+CREATE VIEW Bad_Performance_Product AS
+
+SELECT t1.Product_ID, t1.Product_Name, t1.Category_Name, t1.Price, t1.Sales_2020, IFNULL(t2.Sales_2021, 0) AS Sales_2021
+FROM (
+SELECT p.Product_ID, p.Product_Name, c.Category_Name, p.Price,SUM(i.Order_Quantity * p.Price) AS "Sales_2020"
+		FROM ITEM_ORDERS i NATURAL JOIN ORDERS o NATURAL JOIN PRODUCTS p NATURAL JOIN PRODUCT_CATEGORIES c
+		WHERE o.Order_Year = 2020 GROUP BY p.Product_ID ) t1
+		
+LEFT JOIN (
+SELECT p.Product_ID, p.Product_Name, c.Category_Name, p.Price,SUM(i.Order_Quantity * p.Price) AS "Sales_2021"
+		FROM ITEM_ORDERS i NATURAL JOIN ORDERS o NATURAL JOIN PRODUCTS p NATURAL JOIN PRODUCT_CATEGORIES c
+		WHERE o.Order_Year = 2021 GROUP BY p.Product_ID ) t2
+		
+ON t1.Product_ID = t2.Product_ID
+WHERE t2.Product_ID IS NULL
+ORDER BY t1.Category_Name
+```
+
+
